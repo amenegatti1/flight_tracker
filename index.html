@@ -302,6 +302,12 @@ header {
   cursor: pointer; letter-spacing: 2px; transition: all 0.2s;
 }
 .s-save:hover { background: rgba(0,255,136,0.22); }
+.s-signup {
+  display: block; margin-top: 8px; font-size: 11px;
+  color: var(--cyan); text-decoration: none; letter-spacing: 0.3px;
+  opacity: 0.75; transition: opacity 0.2s;
+}
+.s-signup:hover { opacity: 1; }
 
 /* ── Toast ── */
 #toast {
@@ -390,7 +396,7 @@ header {
         <input class="s-inp" id="s-lat" type="number" placeholder="Latitude" step="0.0001">
         <input class="s-inp" id="s-lon" type="number" placeholder="Longitude" step="0.0001">
       </div>
-      <button class="s-geo" id="s-geo-btn" onclick="geolocate()">📍 Use My Current Location</button>
+      <button class="s-geo" id="s-geo-btn" onclick="geolocate()">&#128205; Use My Current Location</button>
     </div>
 
     <div class="s-field">
@@ -403,6 +409,15 @@ header {
       </div>
     </div>
 
+    <div class="s-field">
+      <label class="s-lbl">OpenSky Network Login <span style="color:var(--green);font-size:9px;letter-spacing:0">— required for live data</span></label>
+      <div class="s-row">
+        <input class="s-inp" id="s-osk-u" type="text" placeholder="Username" autocomplete="username" autocorrect="off" autocapitalize="off">
+        <input class="s-inp" id="s-osk-p" type="password" placeholder="Password" autocomplete="current-password">
+      </div>
+      <a href="https://opensky-network.org/index.php?option=com_users&view=registration" target="_blank" class="s-signup">Free account at opensky-network.org →</a>
+    </div>
+
     <div class="s-acts">
       <button class="s-cancel" onclick="closeSettings()">Cancel</button>
       <button class="s-save" onclick="saveSettings()">SAVE &amp; REFRESH</button>
@@ -413,13 +428,14 @@ header {
 <div id="toast"></div>
 
 <script>
-// ── Config ────────────────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────────────────────────
 const OPENSKY_URL = 'https://opensky-network.org/api/states/all';
 const ADSBDB_URL  = 'https://api.adsbdb.com/v0';
 const REFRESH_S   = 30;
 
-// ── State ─────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────────────
 let homeLat = null, homeLon = null, homeName = 'Home', radiusMi = 25;
+let oskUser = '', oskPass = '';
 let flights = [], enrichMap = {}, routeCache = {}, acftCache = {};
 let selectedId = null, countdown = REFRESH_S;
 let cdTimer = null, refreshTimer = null;
@@ -427,7 +443,7 @@ let sweepAngle = 0, lastUpdate = null, firstLoad = true;
 let renderPending = false;
 let settingsRadius = 25;
 
-// ── Math helpers ──────────────────────────────────────────────────────────────
+// ── Math helpers ────────────────────────────────────────────────────────────────────
 const m2ft   = m  => m  != null ? Math.round(m   * 3.28084) : null;
 const ms2kts = v  => v  != null ? Math.round(v   * 1.94384) : null;
 const ms2fpm = v  => v  != null ? Math.round(v   * 196.85)  : null;
@@ -437,14 +453,6 @@ function haverDist(la1, lo1, la2, lo2) {
   const dLa = (la2 - la1) * r, dLo = (lo2 - lo1) * r;
   const a = Math.sin(dLa/2)**2 + Math.cos(la1*r) * Math.cos(la2*r) * Math.sin(dLo/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function bearingTo(la1, lo1, la2, lo2) {
-  const r = Math.PI / 180;
-  const dL = (lo2 - lo1) * r;
-  const y = Math.sin(dL) * Math.cos(la2 * r);
-  const x = Math.cos(la1*r) * Math.sin(la2*r) - Math.sin(la1*r) * Math.cos(la2*r) * Math.cos(dL);
-  return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 }
 
 function hdgDir(h) {
@@ -459,13 +467,14 @@ function timeAgo(d) {
   return s < 60 ? `${s}s ago` : `${Math.round(s/60)}m ago`;
 }
 
-// ── LocalStorage ──────────────────────────────────────────────────────────────
+// ── LocalStorage ──────────────────────────────────────────────────────────────────────────
 function loadSettings() {
   try {
     const s = JSON.parse(localStorage.getItem('ft_cfg') || '{}');
     if (s.lat && s.lon) {
       homeLat = +s.lat; homeLon = +s.lon;
       homeName = s.name || 'Home'; radiusMi = +s.radius || 25;
+      oskUser = s.oskUser || ''; oskPass = s.oskPass || '';
       return true;
     }
   } catch {}
@@ -473,7 +482,7 @@ function loadSettings() {
 }
 
 function persistSettings() {
-  localStorage.setItem('ft_cfg', JSON.stringify({ lat:homeLat, lon:homeLon, name:homeName, radius:radiusMi }));
+  localStorage.setItem('ft_cfg', JSON.stringify({ lat:homeLat, lon:homeLon, name:homeName, radius:radiusMi, oskUser, oskPass }));
 }
 
 function lsGet(k) {
@@ -491,7 +500,7 @@ function lsSet(k, val, ttlH = 48) {
   } catch {}
 }
 
-// ── OpenSky fetch ─────────────────────────────────────────────────────────────
+// ── OpenSky fetch ───────────────────────────────────────────────────────────────────────
 async function fetchFlights() {
   const cosLat = Math.cos(homeLat * Math.PI / 180);
   const dLa = radiusMi / 69, dLo = radiusMi / (69 * cosLat);
@@ -499,12 +508,13 @@ async function fetchFlights() {
     lamin: (homeLat - dLa).toFixed(4), lamax: (homeLat + dLa).toFixed(4),
     lomin: (homeLon - dLo).toFixed(4), lomax: (homeLon + dLo).toFixed(4),
   });
-  const resp = await fetch(`${OPENSKY_URL}?${p}`);
+  const base = (oskUser && oskPass)
+    ? `https://${encodeURIComponent(oskUser)}:${encodeURIComponent(oskPass)}@opensky-network.org/api/states/all`
+    : OPENSKY_URL;
+  const resp = await fetch(`${base}?${p}`);
   if (!resp.ok) throw new Error('OpenSky ' + resp.status);
   const data = await resp.json();
 
-  // State: 0=icao24 1=callsign 2=country 5=lon 6=lat 7=baro_alt(m)
-  // 8=on_ground 9=vel(m/s) 10=track 11=vert_rate(m/s)
   return (data.states || [])
     .filter(s => !s[8] && s[6] != null && s[5] != null)
     .map(s => {
@@ -527,7 +537,7 @@ async function fetchFlights() {
     .sort((a, b) => a.dist - b.dist);
 }
 
-// ── ADSBDB enrichment ─────────────────────────────────────────────────────────
+// ── ADSBDB enrichment ────────────────────────────────────────────────────────────────────
 function scheduleRender() {
   if (renderPending) return;
   renderPending = true;
@@ -539,7 +549,6 @@ async function enrichFlight(f) {
   if (enrichMap[k] !== undefined) return;
   enrichMap[k] = {};
 
-  // Aircraft type
   const acKey = 'ac_' + k;
   let acft = acftCache[k] ?? lsGet(acKey);
   if (!acft) {
@@ -554,7 +563,6 @@ async function enrichFlight(f) {
   }
   if (acft?.type) enrichMap[k].type = acft.type;
 
-  // Route (by callsign)
   const cs = f.callsign;
   if (cs && cs.length > 2 && cs !== f.icao24) {
     const rtKey = 'rt_' + cs;
@@ -583,7 +591,7 @@ async function enrichFlight(f) {
   if (Object.keys(enrichMap[k]).length > 0) scheduleRender();
 }
 
-// ── Refresh loop ──────────────────────────────────────────────────────────────
+// ── Refresh loop ──────────────────────────────────────────────────────────────────────────
 async function refresh() {
   if (!homeLat || !homeLon) { hideLoading(); openSettings(); return; }
   try {
@@ -601,7 +609,7 @@ async function refresh() {
     }
   } catch (e) {
     console.error(e);
-    showToast('OpenSky unreachable — retrying in ' + REFRESH_S + 's');
+    showToast(oskUser ? 'OpenSky error — check credentials in Settings' : 'OpenSky requires a free account — tap ⚙ Settings');
   } finally {
     setDot(false);
     if (firstLoad) { firstLoad = false; hideLoading(); }
@@ -628,7 +636,7 @@ function setDot(on) {
   document.getElementById('dot').className = 'dot' + (on ? ' live' : '');
 }
 
-// ── Render flight list ────────────────────────────────────────────────────────
+// ── Render flight list ──────────────────────────────────────────────────────────────────────────
 function renderList() {
   const el = document.getElementById('fp-scroll');
   if (!flights.length) {
@@ -702,7 +710,7 @@ function selectFlight(id) {
   renderList();
 }
 
-// ── Stars ─────────────────────────────────────────────────────────────────────
+// ── Stars ─────────────────────────────────────────────────────────────────────────────
 function initStars() {
   const c = document.getElementById('stars');
   const ctx = c.getContext('2d');
@@ -733,7 +741,7 @@ function initStars() {
   draw();
 }
 
-// ── Radar ─────────────────────────────────────────────────────────────────────
+// ── Radar ─────────────────────────────────────────────────────────────────────────────
 function initRadar() {
   const wrap   = document.getElementById('radar-wrap');
   const canvas = document.getElementById('radar');
@@ -762,13 +770,11 @@ function initRadar() {
 
     ctx.clearRect(0, 0, w, h);
 
-    // Background
     const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
     bg.addColorStop(0, '#041020'); bg.addColorStop(0.75, '#020d1a'); bg.addColorStop(1, '#010810');
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
     ctx.fillStyle = bg; ctx.fill();
 
-    // Range rings
     for (let i = 1; i <= 4; i++) {
       const rr = R * i / 4;
       ctx.beginPath(); ctx.arc(cx, cy, rr, 0, Math.PI * 2);
@@ -781,12 +787,10 @@ function initRadar() {
       }
     }
 
-    // Crosshairs
     ctx.strokeStyle = 'rgba(0,255,136,0.08)'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
 
-    // Sweep
     sweepAngle = (sweepAngle + 0.011) % (Math.PI * 2);
     const ARC = Math.PI / 5;
     ctx.save();
@@ -803,20 +807,17 @@ function initRadar() {
     ctx.strokeStyle = '#00ff88'; ctx.lineWidth = 1.5;
     ctx.shadowColor = '#00ff88'; ctx.shadowBlur = 14; ctx.stroke(); ctx.restore();
 
-    // Border
     ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2);
     ctx.strokeStyle = 'rgba(0,255,136,0.32)'; ctx.lineWidth = 1.5;
     ctx.shadowColor = '#00ff88'; ctx.shadowBlur = 10; ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Compass
     ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     [['N',0,-1],['E',1,0],['S',0,1],['W',-1,0]].forEach(([l,dx,dy]) => {
       ctx.fillStyle = 'rgba(0,255,136,0.65)';
       ctx.fillText(l, cx + dx*(R+17), cy + dy*(R+17));
     });
 
-    // Flight blips
     if (homeLat && homeLon) {
       flights.forEach(f => {
         const { x, y } = toXY(f.lat, f.lon, cx, cy, ppm);
@@ -830,16 +831,13 @@ function initRadar() {
         ctx.rotate(f.heading * Math.PI / 180);
         ctx.shadowColor = glow; ctx.shadowBlur = sel ? 20 : 11;
 
-        // Plane shape
         ctx.beginPath();
         ctx.moveTo(0, -8); ctx.lineTo(5.5, 5); ctx.lineTo(0, 2.5); ctx.lineTo(-5.5, 5);
         ctx.closePath(); ctx.fillStyle = col; ctx.fill();
-        // Tail
         ctx.beginPath(); ctx.moveTo(-2, 6); ctx.lineTo(0, 2.5); ctx.lineTo(2, 6);
         ctx.fillStyle = col; ctx.fill();
         ctx.restore(); ctx.shadowBlur = 0;
 
-        // Label
         const lbl = (f.callsign || '').trim();
         if (lbl) {
           ctx.font = `${sel ? 'bold ' : ''}9px monospace`;
@@ -852,7 +850,6 @@ function initRadar() {
       });
     }
 
-    // Home marker
     ctx.beginPath(); ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
     ctx.fillStyle = '#00ff88'; ctx.shadowColor = '#00ff88'; ctx.shadowBlur = 20;
     ctx.fill(); ctx.shadowBlur = 0;
@@ -867,11 +864,13 @@ function initRadar() {
   frame();
 }
 
-// ── Settings UI ───────────────────────────────────────────────────────────────
+// ── Settings UI ─────────────────────────────────────────────────────────────────────────
 function openSettings() {
-  document.getElementById('s-name').value = homeName || '';
-  document.getElementById('s-lat').value  = homeLat  || '';
-  document.getElementById('s-lon').value  = homeLon  || '';
+  document.getElementById('s-name').value  = homeName || '';
+  document.getElementById('s-lat').value   = homeLat  || '';
+  document.getElementById('s-lon').value   = homeLon  || '';
+  document.getElementById('s-osk-u').value = oskUser  || '';
+  document.getElementById('s-osk-p').value = oskPass  || '';
   settingsRadius = radiusMi;
   syncRadiusBtns();
   document.getElementById('s-bg').classList.add('open');
@@ -898,7 +897,9 @@ function saveSettings() {
     showToast('Enter valid coordinates'); return;
   }
   homeLat = lat; homeLon = lon; homeName = name; radiusMi = settingsRadius;
-  enrichMap = {}; // reset enrichment for new area
+  oskUser = document.getElementById('s-osk-u').value.trim();
+  oskPass = document.getElementById('s-osk-p').value;
+  enrichMap = {};
   persistSettings();
   closeSettings();
   clearInterval(cdTimer); clearTimeout(refreshTimer);
@@ -920,7 +921,7 @@ function geolocate() {
   );
 }
 
-// ── Toast ─────────────────────────────────────────────────────────────────────
+// ── Toast ─────────────────────────────────────────────────────────────────────────────
 let toastT = null;
 function showToast(msg) {
   const el = document.getElementById('toast');
@@ -928,26 +929,26 @@ function showToast(msg) {
   clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 4500);
 }
 
-// ── Loading ───────────────────────────────────────────────────────────────────
+// ── Loading ─────────────────────────────────────────────────────────────────────────────
 function hideLoading() {
   const el = document.getElementById('loading');
   el.classList.add('out');
   setTimeout(() => el.style.display = 'none', 600);
 }
 
-// ── Wake lock ─────────────────────────────────────────────────────────────────
+// ── Wake lock ───────────────────────────────────────────────────────────────────────────
 async function keepAwake() {
   if ('wakeLock' in navigator) {
     try { await navigator.wakeLock.request('screen'); } catch {}
   }
 }
 
-// ── Visibility ────────────────────────────────────────────────────────────────
+// ── Visibility ──────────────────────────────────────────────────────────────────────────
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { clearInterval(cdTimer); clearTimeout(refreshTimer); refresh(); }
 });
 
-// ── Init ──────────────────────────────────────────────────────────────────────
+// ── Init ───────────────────────────────────────────────────────────────────────────────
 function init() {
   initStars();
   initRadar();
@@ -955,13 +956,14 @@ function init() {
 
   if (loadSettings()) {
     document.getElementById('st-r').textContent = `RADIUS ${radiusMi}MI`;
-    refresh();
+    if (!oskUser || !oskPass) { hideLoading(); openSettings(); }
+    else refresh();
   } else if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       p => {
         homeLat = p.coords.latitude; homeLon = p.coords.longitude;
         homeName = 'Home'; radiusMi = 25;
-        persistSettings(); hideLoading(); refresh();
+        persistSettings(); hideLoading(); openSettings();
       },
       () => { hideLoading(); openSettings(); },
       { timeout: 8000 }
