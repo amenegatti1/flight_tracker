@@ -302,6 +302,12 @@ header {
   cursor: pointer; letter-spacing: 2px; transition: all 0.2s;
 }
 .s-save:hover { background: rgba(0,255,136,0.22); }
+.s-signup {
+  display: block; margin-top: 8px; font-size: 11px;
+  color: var(--cyan); text-decoration: none; letter-spacing: 0.3px;
+  opacity: 0.75; transition: opacity 0.2s;
+}
+.s-signup:hover { opacity: 1; }
 
 /* ── Toast ── */
 #toast {
@@ -403,6 +409,15 @@ header {
       </div>
     </div>
 
+    <div class="s-field">
+      <label class="s-lbl">OpenSky Network Login <span style="color:var(--green);font-size:9px;letter-spacing:0">— required for live data</span></label>
+      <div class="s-row">
+        <input class="s-inp" id="s-osk-u" type="text" placeholder="Username" autocomplete="username" autocorrect="off" autocapitalize="off">
+        <input class="s-inp" id="s-osk-p" type="password" placeholder="Password" autocomplete="current-password">
+      </div>
+      <a href="https://opensky-network.org/index.php?option=com_users&view=registration" target="_blank" class="s-signup">Free account at opensky-network.org →</a>
+    </div>
+
     <div class="s-acts">
       <button class="s-cancel" onclick="closeSettings()">Cancel</button>
       <button class="s-save" onclick="saveSettings()">SAVE &amp; REFRESH</button>
@@ -420,6 +435,7 @@ const REFRESH_S   = 30;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let homeLat = null, homeLon = null, homeName = 'Home', radiusMi = 25;
+let oskUser = '', oskPass = '';
 let flights = [], enrichMap = {}, routeCache = {}, acftCache = {};
 let selectedId = null, countdown = REFRESH_S;
 let cdTimer = null, refreshTimer = null;
@@ -466,6 +482,7 @@ function loadSettings() {
     if (s.lat && s.lon) {
       homeLat = +s.lat; homeLon = +s.lon;
       homeName = s.name || 'Home'; radiusMi = +s.radius || 25;
+      oskUser = s.oskUser || ''; oskPass = s.oskPass || '';
       return true;
     }
   } catch {}
@@ -473,7 +490,7 @@ function loadSettings() {
 }
 
 function persistSettings() {
-  localStorage.setItem('ft_cfg', JSON.stringify({ lat:homeLat, lon:homeLon, name:homeName, radius:radiusMi }));
+  localStorage.setItem('ft_cfg', JSON.stringify({ lat:homeLat, lon:homeLon, name:homeName, radius:radiusMi, oskUser, oskPass }));
 }
 
 function lsGet(k) {
@@ -499,7 +516,12 @@ async function fetchFlights() {
     lamin: (homeLat - dLa).toFixed(4), lamax: (homeLat + dLa).toFixed(4),
     lomin: (homeLon - dLo).toFixed(4), lomax: (homeLon + dLo).toFixed(4),
   });
-  const resp = await fetch(`${OPENSKY_URL}?${p}`);
+  // Embed credentials in URL so the request is treated as a simple request
+  // and avoids CORS preflight issues with the Authorization header.
+  const base = (oskUser && oskPass)
+    ? `https://${encodeURIComponent(oskUser)}:${encodeURIComponent(oskPass)}@opensky-network.org/api/states/all`
+    : OPENSKY_URL;
+  const resp = await fetch(`${base}?${p}`);
   if (!resp.ok) throw new Error('OpenSky ' + resp.status);
   const data = await resp.json();
 
@@ -601,7 +623,7 @@ async function refresh() {
     }
   } catch (e) {
     console.error(e);
-    showToast('OpenSky unreachable — retrying in ' + REFRESH_S + 's');
+    showToast(oskUser ? 'OpenSky error — check credentials in Settings' : 'OpenSky requires a free account — tap ⚙ Settings');
   } finally {
     setDot(false);
     if (firstLoad) { firstLoad = false; hideLoading(); }
@@ -869,9 +891,11 @@ function initRadar() {
 
 // ── Settings UI ───────────────────────────────────────────────────────────────
 function openSettings() {
-  document.getElementById('s-name').value = homeName || '';
-  document.getElementById('s-lat').value  = homeLat  || '';
-  document.getElementById('s-lon').value  = homeLon  || '';
+  document.getElementById('s-name').value  = homeName || '';
+  document.getElementById('s-lat').value   = homeLat  || '';
+  document.getElementById('s-lon').value   = homeLon  || '';
+  document.getElementById('s-osk-u').value = oskUser  || '';
+  document.getElementById('s-osk-p').value = oskPass  || '';
   settingsRadius = radiusMi;
   syncRadiusBtns();
   document.getElementById('s-bg').classList.add('open');
@@ -898,6 +922,8 @@ function saveSettings() {
     showToast('Enter valid coordinates'); return;
   }
   homeLat = lat; homeLon = lon; homeName = name; radiusMi = settingsRadius;
+  oskUser = document.getElementById('s-osk-u').value.trim();
+  oskPass = document.getElementById('s-osk-p').value;
   enrichMap = {}; // reset enrichment for new area
   persistSettings();
   closeSettings();
@@ -955,7 +981,8 @@ function init() {
 
   if (loadSettings()) {
     document.getElementById('st-r').textContent = `RADIUS ${radiusMi}MI`;
-    refresh();
+    if (!oskUser || !oskPass) { hideLoading(); openSettings(); }
+    else refresh();
   } else if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       p => {
